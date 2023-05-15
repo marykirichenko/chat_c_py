@@ -1,0 +1,140 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <sys/select.h>
+
+#define MAX_CLIENTS 3
+#define BUFFER_SIZE 1024
+#define PORT 8080
+
+struct client {
+    int client_socket;
+    int client_pipe[2];
+};
+struct client clients_st[MAX_CLIENTS] = {0};
+int server_socket;
+fd_set readfds;
+
+void close_client(int client_index) {
+    close(clients_st[client_index].client_pipe[0]);
+    close(clients_st[client_index].client_pipe[1]);
+    clients_st[client_index].client_socket = 0;
+    printf("Client disconnected\n");
+}
+
+void handle_client(int client_index) {
+    char buffer[BUFFER_SIZE] = {0};
+    int read_size = read(clients_st[client_index].client_pipe[0], buffer, BUFFER_SIZE);
+
+    if (read_size <= 0) {
+        close_client(client_index);
+    } else {
+        printf("%s\n", buffer);
+
+        for (int j = 0; j < MAX_CLIENTS; j++) {
+            if (j != client_index && clients_st[j].client_socket > 0) {
+                write(clients_st[j].client_pipe[1], buffer, strlen(buffer));
+            }
+        }
+    }
+}
+
+int main() {
+    struct sockaddr_in server_address;
+    int addrlen = sizeof(server_address);
+
+    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket < 0) {
+        printf("Error creating socket\n");
+        return 1;
+    }
+
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = INADDR_ANY;
+    server_address.sin_port = htons(PORT);
+
+    if (bind(server_socket, (struct sockaddr*) &server_address, sizeof(server_address)) < 0) {
+        printf("Error binding socket\n");
+        return 1;
+    }
+
+    if (listen(server_socket, MAX_CLIENTS) < 0) {
+        printf("Error listening on socket\n");
+        return 1;
+    }
+
+    printf("Server listening on %d\n", PORT);
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (pipe(clients_st[i].client_pipe) < 0) {
+            printf("Error while creating a pipe\n");
+            return 1;
+        }
+    }
+
+    while (1) {
+        FD_ZERO(&readfds);
+        FD_SET(server_socket, &readfds);
+
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            int client_pipe_read = clients_st[i].client_pipe[0];
+            if (client_pipe_read > 0) {
+                FD_SET(client_pipe_read, &readfds);
+            }
+        }
+
+        int activity = select(FD_SETSIZE, &readfds, NULL, NULL, NULL);
+        if (activity < 0) {
+            printf("Error in select\n");
+            return 1;
+        }
+
+        if (FD_ISSET(server_socket, &readfds)) {
+            int new_socket = accept(server_socket, (struct sockaddr*) &server_address, (socklen_t*) &addrlen);
+                        if (new_socket < 0) {
+                printf("Error accepting client\n");
+                continue;
+            }
+
+            int index = -1;
+            for (int i = 0; i < MAX_CLIENTS; i++) {
+                if (clients_st[i].client_socket == 0) {
+                    clients_st[i].client_socket = new_socket;
+                    index = i;
+                    printf("New client connected: %d\n", new_socket);
+                    break;
+                }
+            }
+
+            if (index >= 0) {
+                close(clients_st[index].client_pipe[0]);
+                close(clients_st[index].client_pipe[1]);
+                if (pipe(clients_st[index].client_pipe) < 0) {
+                    printf("Error while creating a pipe\n");
+                    return 1;
+                }
+                clients_st[index].client_pipe[0] = new_socket;
+                clients_st[index].client_pipe[1] = new_socket;
+            } else {
+                close(new_socket);
+            }
+        }
+
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            int client_pipe_read = clients_st[i].client_pipe[0];
+            if (client_pipe_read > 0 && FD_ISSET(client_pipe_read, &readfds)) {
+                handle_client(i);
+            }
+        }
+    }
+
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        close_client(i);
+    }
+
+    return 0;
+}
+
